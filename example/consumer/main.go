@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -18,12 +19,13 @@ const (
 
 	reportBatchSize = 10000
 	consumeDuration = time.Millisecond
-	shouldLog       = false
+	shouldLog       = true
 )
 
 func main() {
 	errChan := make(chan error, 10)
 	go logErrors(errChan)
+	ctx, cancel := context.WithCancel(context.Background())
 
 	connection, err := rmq.OpenConnection("consumer", "tcp", "localhost:6379", 2, errChan)
 	if err != nil {
@@ -46,17 +48,58 @@ func main() {
 		}
 	}
 
-	signals := make(chan os.Signal, 1)
-	signal.Notify(signals, syscall.SIGINT)
+	// publish messages to the queue until the context is cancelled
+	go publish(ctx, 0, queue)
+
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, syscall.SIGTERM, syscall.SIGINT)
 	defer signal.Stop(signals)
 
+	time.Sleep(time.Second)
+	log.Print("STOPPED")
+	finished := queue.StopConsuming()
+	<-finished
+	log.Print("FINISHED")
+
+	if err := queue.StartConsuming(prefetchLimit, pollDuration); err != nil {
+		panic(err)
+	}
+	log.Print("STARTED")
+
+	for i := 0; i < numConsumers; i++ {
+		name := fmt.Sprintf("consumer %d", i)
+		if _, err := queue.AddConsumer(name, NewConsumer(i)); err != nil {
+			panic(err)
+		}
+	}
+
+	time.Sleep(time.Second)
+	log.Print("STOPPED")
+	finished = queue.StopConsuming()
+	<-finished
+	log.Print("FINISHED")
+
+	if err := queue.StartConsuming(prefetchLimit, pollDuration); err != nil {
+		panic(err)
+	}
+	log.Print("STARTED")
+
+	for i := 0; i < numConsumers; i++ {
+		name := fmt.Sprintf("consumer %d", i)
+		if _, err := queue.AddConsumer(name, NewConsumer(i)); err != nil {
+			panic(err)
+		}
+	}
+
 	<-signals // wait for signal
+	cancel()
 	go func() {
 		<-signals // hard exit on second signal (in case shutdown gets stuck)
 		os.Exit(1)
 	}()
 
 	<-connection.StopAllConsuming() // wait for all Consume() calls to finish
+	log.Print("STOPPED ALL CONSUMING")
 }
 
 type Consumer struct {
@@ -123,5 +166,14 @@ func logErrors(errChan <-chan error) {
 func debugf(format string, args ...interface{}) {
 	if shouldLog {
 		log.Printf(format, args...)
+	}
+}
+
+func publish(ctx context.Context, i int, queue rmq.Queue) {
+	if err := queue.Publish(fmt.Sprintf("delivery:%d", i)); err != nil {
+		log.Print("publish error: ", err)
+	}
+	if err := ctx.Err(); err == nil {
+		publish(ctx, i+1, queue)
 	}
 }
