@@ -131,6 +131,11 @@ func (queue *redisQueue) StartConsuming(prefetchLimit int64, pollDuration time.D
 		return err
 	}
 
+	// remove existing consumers that may be present if the queue was stopped
+	if _, err := queue.removeConsumers(); err != nil {
+		return err
+	}
+
 	queue.prefetchLimit = prefetchLimit
 	queue.pollDuration = pollDuration
 	queue.deliveryChan = make(chan Delivery, prefetchLimit)
@@ -150,7 +155,9 @@ func (queue *redisQueue) consume() {
 			errorCount = 0
 
 		case ErrorConsumingStopped:
-			close(queue.deliveryChan)
+			if queue.deliveryChan != nil {
+				close(queue.deliveryChan)
+			}
 			return
 
 		default: // redis error
@@ -243,6 +250,7 @@ func (queue *redisQueue) StopConsuming() <-chan struct{} {
 	go func() {
 		queue.ackCancel()
 		queue.stopWg.Wait()
+		queue.deliveryChan = nil
 		close(finishedChan)
 		// log.Printf("rmq queue stopped consuming %s", queue)
 	}()
@@ -368,6 +376,12 @@ func (queue *redisQueue) batchTimeout(batchSize int64, batch []Delivery, timeout
 func (queue *redisQueue) addConsumer(tag string) (name string, err error) {
 	if queue.deliveryChan == nil {
 		return "", ErrorNotConsuming
+	}
+
+	select {
+	case <-queue.consumingStopped: // consuming stopped
+		return "", ErrorConsumingStopped
+	default:
 	}
 
 	name = fmt.Sprintf("%s-%s", tag, RandomString(6))
@@ -500,4 +514,8 @@ func (queue *redisQueue) rejectedCount() (int64, error) {
 
 func (queue *redisQueue) getConsumers() ([]string, error) {
 	return queue.redisClient.SMembers(queue.consumersKey)
+}
+
+func (queue *redisQueue) removeConsumers() (int64, error) {
+	return queue.redisClient.Del(queue.consumersKey)
 }
