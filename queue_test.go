@@ -453,6 +453,40 @@ func (suite *QueueSuite) TestStopConsuming_Consumer(c *C) {
 	connection.StopHeartbeat()
 }
 
+func (suite *QueueSuite) TestStartConsuming_StoppedConsumer(c *C) {
+	connection := OpenConnection("consume", "tcp", "localhost:6379", 1)
+	queue := connection.OpenQueue("consume-q").(*redisQueue)
+	queue.PurgeReady()
+
+	deliveryCount := 30
+
+	for i := 0; i < deliveryCount; i++ {
+		queue.Publish("d" + strconv.Itoa(i))
+	}
+
+	queue.StartConsuming(20, time.Millisecond)
+	consumer := NewTestConsumer("c")
+	queue.AddConsumer("consume", consumer)
+
+	finishedChan := queue.StopConsuming()
+	c.Assert(finishedChan, NotNil)
+
+	<-finishedChan
+
+	consumedCount := len(consumer.LastDeliveries)
+
+	// make sure all fetched deliveries are consumed
+	c.Check(consumedCount, Equals, deliveryCount-queue.ReadyCount())
+	c.Check(queue.deliveryChan, HasLen, 0)
+
+	c.Assert(queue.StartConsuming(20, time.Millisecond), Equals, true)
+	queue.AddConsumer("consume", consumer)
+	time.Sleep(2 * time.Millisecond)
+
+	queue.StopConsuming()
+	connection.StopHeartbeat()
+}
+
 func (suite *QueueSuite) TestStopConsuming_BatchConsumer(c *C) {
 	connection := OpenConnection("batchConsume", "tcp", "localhost:6379", 1)
 	queue := connection.OpenQueue("batchConsume-q").(*redisQueue)

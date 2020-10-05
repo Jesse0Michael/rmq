@@ -60,7 +60,7 @@ type redisQueue struct {
 	deliveryChan     chan Delivery // nil for publish channels, not nil for consuming channels
 	prefetchLimit    int           // max number of prefetched deliveries number of unacked can go up to prefetchLimit + numConsumers
 	pollDuration     time.Duration
-	consumingStopped int32 // queue status, 1 for stopped, 0 for consuming
+	consumingStopped int32 // queue status, 2 for stopping, 1 for stopped, 0 for consuming
 	stopWg           sync.WaitGroup
 }
 
@@ -147,7 +147,6 @@ func (queue *redisQueue) ReturnAllUnacked() int {
 	if !ok {
 		return 0
 	}
-
 	unackedCount := count
 	for i := 0; i < unackedCount; i++ {
 		if _, ok := queue.redisClient.RPopLPush(queue.unackedKey, queue.readyKey); !ok {
@@ -178,7 +177,7 @@ func (queue *redisQueue) ReturnRejected(count int) int {
 		if !ok {
 			return i
 		}
-		// debug(fmt.Sprintf("rmq queue returned rejected delivery %s %s", value, queue.readyKey)) // COMMENTOUT
+		// debug(fmt.Sprintf("rmq queue returned rejected delivery %s %s", count, queue.readyKey)) // COMMENTOUT
 	}
 
 	return count
@@ -204,8 +203,9 @@ func (queue *redisQueue) SetPushQueue(pushQueue Queue) {
 // must be called before consumers can be added!
 // pollDuration is the duration the queue sleeps before checking for new deliveries
 func (queue *redisQueue) StartConsuming(prefetchLimit int, pollDuration time.Duration) bool {
-	if queue.deliveryChan != nil {
-		return false // already consuming
+	if atomic.LoadInt32(&queue.consumingStopped) == int32(0) ||
+		atomic.LoadInt32(&queue.consumingStopped) == int32(2) {
+		return false // already consuming or stopping
 	}
 
 	// add queue to list of queues consumed on this connection
@@ -224,15 +224,19 @@ func (queue *redisQueue) StartConsuming(prefetchLimit int, pollDuration time.Dur
 
 func (queue *redisQueue) StopConsuming() <-chan struct{} {
 	finishedChan := make(chan struct{})
-	if queue.deliveryChan == nil || atomic.LoadInt32(&queue.consumingStopped) == int32(1) {
-		close(finishedChan) // not consuming or already stopped
+	if queue.deliveryChan == nil ||
+		atomic.LoadInt32(&queue.consumingStopped) == int32(1) ||
+		atomic.LoadInt32(&queue.consumingStopped) == int32(2) {
+		close(finishedChan) // not consuming, already stopped or stopping
 		return finishedChan
 	}
 
 	// log.Printf("rmq queue stopping %s", queue)
-	atomic.StoreInt32(&queue.consumingStopped, 1)
+	atomic.StoreInt32(&queue.consumingStopped, 2)
 	go func() {
 		queue.stopWg.Wait()
+		atomic.StoreInt32(&queue.consumingStopped, 1)
+		queue.RemoveAllConsumers()
 		close(finishedChan)
 		// log.Printf("rmq queue stopped consuming %s", queue)
 	}()
@@ -306,7 +310,7 @@ func (queue *redisQueue) consume() {
 			time.Sleep(queue.pollDuration)
 		}
 
-		if atomic.LoadInt32(&queue.consumingStopped) == int32(1) {
+		if atomic.LoadInt32(&queue.consumingStopped) == int32(2) {
 			// log.Printf("rmq queue stopped consuming %s", queue)
 			close(queue.deliveryChan)
 			// log.Printf("rmq queue stopped fetching %s", queue)
@@ -318,7 +322,7 @@ func (queue *redisQueue) consume() {
 func (queue *redisQueue) batchSize() int {
 	// prefetchCount := len(queue.deliveryChan)
 	// prefetchLimit := queue.prefetchLimit - prefetchCount
-	prefetchLimit := queue.prefetchLimit - queue.UnackedCount() 
+	prefetchLimit := queue.prefetchLimit - queue.UnackedCount()
 
 	// TODO: ignore ready count here and just return prefetchLimit?
 	if readyCount := queue.ReadyCount(); readyCount < prefetchLimit {

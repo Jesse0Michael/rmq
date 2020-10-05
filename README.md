@@ -187,11 +187,9 @@ you want to wait until all consumers are idle you can wait on the `finishedChan`
 ```
 
 This is useful to implement a graceful shutdown of a consumer service. Please
-note that after calling `StopConsuming` the queue might not be in a state where
-you can add consumers and call `StartConsuming` again. If you have a use case
-where you actually need that sort of flexibility, please let us know. Currently
-for each queue you are only supposed to call `StartConsuming` and
-`StopConsuming` at most once.
+note that after calling `StopConsuming` the queue might be in a stopping state where
+you cannot add consumers and call `StartConsuming` again. You must wait until the queue is
+finished stopping, then you may call `StartConsuming` again and re-add your consumers.
 
 ## Testing Included
 
