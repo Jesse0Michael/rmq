@@ -245,7 +245,7 @@ func (queue *redisQueue) StopConsuming() <-chan struct{} {
 }
 
 // AddConsumer adds a consumer to the queue and returns its internal name
-// panics if StartConsuming wasn't called before!
+// panics if StartConsuming wasn't called before or if the queue is in a stopping state!
 func (queue *redisQueue) AddConsumer(tag string, consumer Consumer) string {
 	queue.stopWg.Add(1)
 	name := queue.addConsumer(tag)
@@ -283,6 +283,9 @@ func (queue *redisQueue) RemoveConsumer(name string) bool {
 func (queue *redisQueue) addConsumer(tag string) string {
 	if queue.deliveryChan == nil {
 		log.Panicf("rmq queue failed to add consumer, call StartConsuming first! %s", queue)
+	}
+	if atomic.LoadInt32(&queue.consumingStopped) == int32(2) {
+		log.Panicf("rmq queue failed to add consumer, queue is in a stopping state! %s", queue)
 	}
 
 	name := fmt.Sprintf("%s-%s", tag, uniuri.NewLen(6))
